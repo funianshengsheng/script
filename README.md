@@ -3,5 +3,5 @@ bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/h
 ```
 
 ```
-bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/heads/main/net-tcp-tune.sh)
+bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/heads/main/vless-server.sh)
 ```
