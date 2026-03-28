@@ -234,9 +234,11 @@ cleanup_old_logs_once_per_day() {
 ############################
 
 load_config() {
-  [[ -f "$CONFIG_FILE" ]] || return 0
-  # shellcheck source=/dev/null
-  source "$CONFIG_FILE"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    mkdir -p "$(dirname "$CONFIG_FILE")" 2>/dev/null || true
+    return 0
+  fi
+  source "$CONFIG_FILE" || true
 }
 
 save_config() {
