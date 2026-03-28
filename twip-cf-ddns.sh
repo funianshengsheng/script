@@ -930,7 +930,7 @@ console_main() {
     printf "  ${C_CYAN}4${C_RESET}) 定时任务管理\n"
     printf "  ${C_CYAN}5${C_RESET}) 清除故障告警状态\n"
     printf "  ${C_CYAN}6${C_RESET}) 修改配置\n"
-    printf "  ${C_RED}7${C_RESET})  完整卸载\n"
+    printf "  ${C_RED}7${C_RESET}) 完整卸载\n"
     printf "  ${C_CYAN}0${C_RESET}) 退出\n"
     echo
     printf "%s请输入选项: %s" "$C_BOLD" "$C_RESET"
@@ -1175,7 +1175,7 @@ Usage:
   $0 --install              仅安装/启用 systemd 定时任务
   $0 setup                  运行配置向导
   $0 console                打开交互控制台（同 tw 命令）
-  $0 uninstall              完整卸载
+  $0 uninstall             完整卸载
 EOT
 }
 
