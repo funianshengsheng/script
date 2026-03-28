@@ -169,7 +169,7 @@ str_display_width() {
 
   for (( i=0; i<${#s}; i++ )); do
     ch="${s:i:1}"
-    if [[ "$ch" =~ [ -~] ]]; then
+    if LC_ALL=C printf '%s' "$ch" | grep -q '^[ -~]$'; then
       ((width+=1))
     else
       ((width+=2))
