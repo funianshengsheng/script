@@ -665,13 +665,13 @@ run_setup() {
   printf "%s" "$C_MAGENTA"; print_line; printf "%s" "$C_RESET"
   print_kv_plain "CF API Token" "$(mask_text "$CF_API_TOKEN")"
   print_kv_plain "CF Zone ID"   "$(mask_text "$CF_ZONE_ID")"
-  print_kv_plain "DDNS 域名"    "$CF_RECORD_NAME"
+  print_kv_plain "DDNS 域名"     "$CF_RECORD_NAME"
   print_kv_plain "TTL"          "$CF_TTL"
-  print_kv_plain "CF 代理"      "$CF_PROXIED"
+  print_kv_plain "CF 代理"       "$CF_PROXIED"
   print_kv_plain "TG Bot Token" "$( ! _is_placeholder "$TG_BOT_TOKEN" && mask_text "$TG_BOT_TOKEN" || echo "未配置" )"
   print_kv_plain "TG Chat ID"   "$( ! _is_placeholder "$TG_CHAT_ID"   && echo "$TG_CHAT_ID" || echo "未配置" )"
-  print_kv_plain "时区"         "$DISPLAY_TZ"
-  print_kv_plain "定时间隔"     "${TIMER_INTERVAL_MINUTES} 分钟"
+  print_kv_plain "时区"          "$DISPLAY_TZ"
+  print_kv_plain "定时间隔"       "${TIMER_INTERVAL_MINUTES} 分钟"
   print_kv_plain "VM UUID"      "$( [[ -n "$VM_UUID" ]] && echo "$VM_UUID" || echo "自动检测" )"
   printf "%s" "$C_MAGENTA"; print_line; printf "%s" "$C_RESET"; echo
 
@@ -810,11 +810,11 @@ console_show_status() {
   printf "%s%s  TW IPv6 DDNS 状态总览%s\n" "$C_BOLD" "$C_CYAN" "$C_RESET"
   printf "%s" "$C_MAGENTA"; print_line; printf "%s" "$C_RESET"
   print_kv "域名"          "${C_BOLD}${CF_RECORD_NAME}${C_RESET}"
-  print_kv "定时任务"      "$timer_status"
+  print_kv "定时任务"       "$timer_status"
   print_kv_plain "上次执行" "$last_run"
-  print_kv "告警状态"      "$alert_state"
-  print_kv "本机全局 IPv6" "${C_CYAN}${tw_ipv6}${C_RESET}"
-  print_kv "上次同步 IP"   "${C_CYAN}${last_ip}${C_RESET}"
+  print_kv "告警状态"       "$alert_state"
+  print_kv "本机全局 IPv6"  "${C_CYAN}${tw_ipv6}${C_RESET}"
+  print_kv "上次同步 IP"    "${C_CYAN}${last_ip}${C_RESET}"
   print_kv_plain "配置文件" "$CONFIG_FILE"
   print_kv_plain "日志文件" "$LOG_FILE"
   print_kv_plain "时区"     "$DISPLAY_TZ"
@@ -897,7 +897,7 @@ console_main() {
     printf "  ${C_CYAN}4${C_RESET}) 定时任务管理\n"
     printf "  ${C_CYAN}5${C_RESET}) 清除故障告警状态\n"
     printf "  ${C_CYAN}6${C_RESET}) 修改配置\n"
-    printf "  ${C_RED}7${C_RESET}) 完整卸载\n"
+    printf "  ${C_RED}7${C_RESET})  完整卸载\n"
     printf "  ${C_CYAN}0${C_RESET}) 退出\n"
     echo
     printf "%s请输入选项: %s" "$C_BOLD" "$C_RESET"
@@ -1139,10 +1139,10 @@ usage() {
 Usage:
   $0                        首次运行：配置检测 -> 安装 timer -> 执行同步
   $0 --run                  仅执行一次同步
-  $0 --install                仅安装/启用 systemd 定时任务
+  $0 --install              仅安装/启用 systemd 定时任务
   $0 setup                  运行配置向导
   $0 console                打开交互控制台（同 tw 命令）
-  $0 uninstall                完整卸载
+  $0 uninstall              完整卸载
 EOT
 }
 
