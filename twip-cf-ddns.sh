@@ -543,7 +543,7 @@ Description=Run TW IPv6 DDNS every ${interval} minutes
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=${interval}min
+OnCalendar=*:0/${interval}
 Unit=twip-cf-ddns.service
 Persistent=true
 
