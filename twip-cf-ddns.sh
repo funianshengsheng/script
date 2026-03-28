@@ -749,9 +749,7 @@ console_show_status() {
   [[ -f "$LAST_IP_FILE" ]] && last_ip="$(cat "$LAST_IP_FILE" 2>/dev/null || true)"
   [[ -z "$last_ip" ]] && last_ip="无记录"
 
-  tw_ipv6="$(ip -6 addr show scope global 2>/dev/null \
-    | grep -oP '(?<=inet6 )[0-9a-f:]+'
-    | grep -v '^fe80' | head -1 || true)"
+  tw_ipv6="$(ip -6 addr show scope global 2>/dev/null | grep -oP '(?<=inet6 )[0-9a-f:]+' | grep -v '^fe80' | head -1 || true)"
   [[ -z "$tw_ipv6" ]] && tw_ipv6="未检测到"
 
   alert_state="$(last_alert_state)"
