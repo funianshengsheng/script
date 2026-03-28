@@ -3,5 +3,5 @@ bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/h
 ```
 
 ```
-bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/heads/main/vless-server.sh)
+bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/heads/main/twip-cf-ddns.sh)
 ```
