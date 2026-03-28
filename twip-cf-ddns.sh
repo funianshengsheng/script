@@ -163,50 +163,53 @@ print_subline() {
   printf '%*s\n' "$UI_WIDTH" '' | tr ' ' '-'
 }
 
-str_display_width() {
-  local s="$1"
-  local i ch width=0
+format_label() {
+  case "$1" in
+    "域名")           echo "域名             " ;;
+    "定时任务")       echo "定时任务         " ;;
+    "上次执行")       echo "上次执行         " ;;
+    "告警状态")       echo "告警状态         " ;;
+    "本机全局 IPv6")  echo "本机全局 IPv6    " ;;
+    "上次同步 IP")    echo "上次同步 IP      " ;;
+    "配置文件")       echo "配置文件         " ;;
+    "日志文件")       echo "日志文件         " ;;
+    "时区")           echo "时区             " ;;
 
-  for (( i=0; i<${#s}; i++ )); do
-    ch="${s:i:1}"
-    if LC_ALL=C printf '%s' "$ch" | grep -q '^[ -~]$'; then
-      ((width+=1))
-    else
-      ((width+=2))
-    fi
-  done
+    "CF API Token")   echo "CF API Token     " ;;
+    "CF Zone ID")     echo "CF Zone ID       " ;;
+    "DDNS 域名")      echo "DDNS 域名        " ;;
+    "TTL")            echo "TTL              " ;;
+    "CF 代理")        echo "CF 代理          " ;;
+    "TG Bot Token")   echo "TG Bot Token     " ;;
+    "TG Chat ID")     echo "TG Chat ID       " ;;
+    "定时间隔")       echo "定时间隔         " ;;
+    "VM UUID")        echo "VM UUID          " ;;
 
-  echo "$width"
-}
+    "systemd timer")   echo "systemd timer    " ;;
+    "systemd service") echo "systemd service  " ;;
+    "脚本文件")        echo "脚本文件         " ;;
+    "快捷命令")        echo "快捷命令         " ;;
+    "状态目录")        echo "状态目录         " ;;
+    "日志目录")        echo "日志目录         " ;;
 
-pad_display_right() {
-  local s="$1"
-  local target_width="$2"
-  local current_width pad_count
-
-  current_width="$(str_display_width "$s")"
-  pad_count=$(( target_width - current_width ))
-  (( pad_count < 0 )) && pad_count=0
-
-  printf "%s%*s" "$s" "$pad_count" ""
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
 }
 
 print_kv() {
-  local key="$1"
-  local val="$2"
-  local padded_key
-
-  padded_key="$(pad_display_right "$key" "$KV_KEY_WIDTH")"
-  printf "  %s : %b\n" "$padded_key" "$val"
+  local key val
+  key="$(format_label "$1")"
+  val="$2"
+  printf "  %s : %b\n" "$key" "$val"
 }
 
 print_kv_plain() {
-  local key="$1"
-  local val="$2"
-  local padded_key
-
-  padded_key="$(pad_display_right "$key" "$KV_KEY_WIDTH")"
-  printf "  %s : %s\n" "$padded_key" "$val"
+  local key val
+  key="$(format_label "$1")"
+  val="$2"
+  printf "  %s : %s\n" "$key" "$val"
 }
 
 log_banner() {
