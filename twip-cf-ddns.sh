@@ -665,13 +665,13 @@ run_setup() {
   printf "%s" "$C_MAGENTA"; print_line; printf "%s" "$C_RESET"
   print_kv_plain "CF API Token" "$(mask_text "$CF_API_TOKEN")"
   print_kv_plain "CF Zone ID"   "$(mask_text "$CF_ZONE_ID")"
-  print_kv_plain "DDNS 域名"     "$CF_RECORD_NAME"
+  print_kv_plain "DDNS 域名"       "$CF_RECORD_NAME"
   print_kv_plain "TTL"          "$CF_TTL"
-  print_kv_plain "CF 代理"       "$CF_PROXIED"
+  print_kv_plain "CF 代理"         "$CF_PROXIED"
   print_kv_plain "TG Bot Token" "$( ! _is_placeholder "$TG_BOT_TOKEN" && mask_text "$TG_BOT_TOKEN" || echo "未配置" )"
   print_kv_plain "TG Chat ID"   "$( ! _is_placeholder "$TG_CHAT_ID"   && echo "$TG_CHAT_ID" || echo "未配置" )"
-  print_kv_plain "时区"          "$DISPLAY_TZ"
-  print_kv_plain "定时间隔"       "${TIMER_INTERVAL_MINUTES} 分钟"
+  print_kv_plain "时区"            "$DISPLAY_TZ"
+  print_kv_plain "定时间隔"           "${TIMER_INTERVAL_MINUTES} 分钟"
   print_kv_plain "VM UUID"      "$( [[ -n "$VM_UUID" ]] && echo "$VM_UUID" || echo "自动检测" )"
   printf "%s" "$C_MAGENTA"; print_line; printf "%s" "$C_RESET"; echo
 
