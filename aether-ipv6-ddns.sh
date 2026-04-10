@@ -1,4 +1,3 @@
-cat > /root/aether-ipv6-ddns.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1389,7 +1388,3 @@ case "${1:-}" in
     exit 1
     ;;
 esac
-EOF
-
-chmod +x /root/aether-ipv6-ddns.sh
-bash -n /root/aether-ipv6-ddns.sh && echo "脚本语法检查通过"
