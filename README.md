@@ -3,5 +3,5 @@ bash <(curl -sL https://raw.githubusercontent.com/funianshengsheng/script/refs/h
 ```
 
 ```
-wget -O twip-cf-ddns.sh https://raw.githubusercontent.com/funianshengsheng/script/refs/heads/main/twip-cf-ddns.sh && bash -x twip-cf-ddns.sh setup
+wget -O aether-ipv6-ddns.sh https://raw.githubusercontent.com/funianshengsheng/script/refs/heads/main/aether-ipv6-ddns.sh && bash -x aether-ipv6-ddns.sh setup
 ```
