@@ -137,7 +137,8 @@ _print_pretty() {
 
 log_info() {
   local msg="$*"
-  [[ "$VERBOSE "" ]] &&_pre_BLUEmsg "[$(timestamp)] [INFO ] $msg"
+  [[ "$VERBOSE" == "1" ]] && _print_pretty "$C_BLUE" "$ICON_INFO" "[INFO]" "$msg"
+_log_write "[$(timestamp)] [INFO ] $msg"
 }
 
 log_step() {
