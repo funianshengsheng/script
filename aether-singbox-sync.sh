@@ -1,4 +1,3 @@
-cat > /usr/local/bin/aether-singbox-sync.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1380,6 +1379,3 @@ case "${1:-}" in
     exit 1
     ;;
 esac
-EOF
-
-chmod +x /usr/local/bin/aether-singbox-sync.sh
