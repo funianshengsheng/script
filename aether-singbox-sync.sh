@@ -87,7 +87,7 @@ _print() {
   local icon="$2"
   local tag="$3"
   local msg="$4"
-  printf "%s%s %s %-6s%s %s\n" "$color" "$icon" "$(timestamp)" "$tag" "$C_RESET" "$msg"
+  printf "%s%s %s %-6s%s %s\n" "$color" "$icon" "$(timestamp)" "$tag" "$C_RESET" "$msg" >&2
 }
 
 log_info() {
@@ -110,13 +110,13 @@ log_ok() {
 
 warn() {
   local msg="$*"
-  _print "$C_YELLOW" "$ICON_WARN" "[WARN]" "$msg" >&2
+  _print "$C_YELLOW" "$ICON_WARN" "[WARN]" "$msg"
   _log_write "[WARN ] $msg"
 }
 
 err() {
   local msg="$*"
-  _print "$C_RED" "$ICON_ERR" "[ERR ]" "$msg" >&2
+  _print "$C_RED" "$ICON_ERR" "[ERR ]" "$msg"
   _log_write "[ERROR] $msg"
 }
 
@@ -127,6 +127,12 @@ need_cmd() {
   }
 }
 
+pause_return() {
+  echo
+  printf "按 Enter 返回..."
+  read -r _ </dev/tty || true
+}
+
 mask_text() {
   local s="${1:-}"
   local len=${#s}
@@ -135,6 +141,36 @@ mask_text() {
     echo "****"
   else
     echo "${s:0:4}****${s: -4}"
+  fi
+}
+
+mask_ipv4() {
+  local ip="${1:-}"
+
+  if [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.*.${BASH_REMATCH[4]}"
+  else
+    echo "${ip:-获取失败}"
+  fi
+}
+
+get_public_ipv4() {
+  local ip=""
+
+  ip="$(curl -4 -fsS --connect-timeout 3 --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+
+  if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ip="$(curl -4 -fsS --connect-timeout 3 --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+  fi
+
+  if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ip="$(curl -4 -fsS --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+
+  if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "$ip"
+  else
+    echo "获取失败"
   fi
 }
 
@@ -317,20 +353,19 @@ send_tg_success() {
 
 send_tg_failure() {
   local title="$1"
-  local detail="$2"
-  local now_sh
+  local _detail="${2:-}"
+  local now_sh public_ipv4 masked_ipv4
 
   now_sh="$(TZ="${DISPLAY_TZ}" date '+%Y-%m-%d %H:%M:%S %Z')"
+  public_ipv4="$(get_public_ipv4)"
+  masked_ipv4="$(mask_ipv4 "$public_ipv4")"
 
-  send_tg_message "❌ *${title}*
+  send_tg_message "🚨 *故障报警*
+❌ *${title}*
 
-*实例*：\`$(instance_label)\`
-*Tag*：\`$(get_target_tag)\`
-*时间*：\`${now_sh}\`
-
-\`\`\`
-${detail}
-\`\`\`"
+*实例名称*：\`$(instance_label)\`
+*IPv4 地址*：\`${masked_ipv4}\`
+*时间*：\`${now_sh}\`"
 }
 
 get_failure_count() {
@@ -685,26 +720,18 @@ run_once() {
   fi
 
   if [[ "$rollback_ok" -eq 1 ]]; then
-    send_tg_failure "sing-box 重启失败，已自动回滚" "旧 IP：${current_ip:-未设置}
-新 IP：${target_ipv6}
-回滚结果：已恢复旧配置并重新启动成功
-
-最近服务状态：
-${restart_error_detail}"
+    send_tg_failure "sing-box 重启失败，已自动回滚"
   else
-    send_tg_failure "sing-box 重启失败，回滚也失败" "旧 IP：${current_ip:-未设置}
-新 IP：${target_ipv6}
-回滚结果：失败，请立即人工处理
-
-最近服务状态：
-${restart_error_detail}"
+    send_tg_failure "sing-box 重启失败，回滚也失败"
   fi
+
+  _log_write "[ERROR] sing-box 重启失败详情: ${restart_error_detail}"
 
   return 1
 }
 
 main_run() {
-  local failure_count failure_detail recent_logs
+  local failure_count failure_detail
 
   log_step "开始执行同步任务"
 
@@ -725,19 +752,8 @@ main_run() {
   fi
 
   if (( failure_count == 3 )); then
-    recent_logs="$(tail -n 80 "$LOG_FILE" 2>/dev/null || true)"
-
     err "连续失败已达到 3 次，发送 Telegram 报警"
-
-    send_tg_failure "sing-box IPv6 同步连续 3 次失败" "脚本已经连续 3 次未能成功获取或写入 IPv6。
-每次运行间隔约 ${TIMER_INTERVAL_MINUTES} 分钟。
-
-失败次数：${failure_count}
-最近失败：${failure_detail}
-
-最近日志：
-${recent_logs}"
-
+    send_tg_failure "sing-box IPv6 同步连续 3 次失败"
     exit 1
   fi
 
@@ -807,7 +823,7 @@ EOF2
 }
 
 run_setup() {
-  exec </dev/tty 2>/dev/null || true
+  [[ -r /dev/tty ]] && exec </dev/tty || true
   ensure_dirs
 
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -894,30 +910,21 @@ run_setup() {
   echo "  Hong-Kong -> wg_interface=tw, tag=twv6"
   echo "  美国地区  -> wg_interface=wg0, tag=attv6"
 
-  TARGET_WG_INTERFACE="$(prompt_input "自定义 wg_interface，留空自动" "$TARGET_WG_INTERFACE")"
-  TARGET_TAG="$(prompt_input "自定义 sing-box tag，留空自动" "$TARGET_TAG")"
-
-  echo
-  echo "[Telegram 通知]"
-  TG_BOT_TOKEN="$(prompt_input "TG Bot Token，留空可跳过" "$TG_BOT_TOKEN" "1")"
+  TARGET_WG_INTERFACE="$(prompt_input "自定义 wg_interface，留空自动" "$TARGET_WG="$(留空 _TOKEN，留空可跳过" "$TG_BOT_TOKEN" "1")"
   TG_CHAT_ID="$(prompt_input "TG Chat ID，留空可跳过" "$TG_CHAT_ID")"
 
   echo
   echo "[高级选项]"
   DISPLAY_TZ="$(prompt_input "时区" "$DISPLAY_TZ")"
 
-  local interval_in
-  interval_in="$(prompt_input "定时间隔，分钟" "$TIMER_INTERVAL_MINUTES")"
-
-  if [[ "$interval_in" =~ ^[0-9]+$ && "$interval_in" -gt 0 ]]; then
+_in="$(，_MIN"9]+$ && "$interval_in" -gt 0 ]]; then
     TIMER_INTERVAL_MINUTES="$interval_in"
   else
     TIMER_INTERVAL_MINUTES=5
   fi
 
   VM_UUID="$(prompt_input "VM UUID，留空自动检测" "$VM_UUID")"
-  SINGBOX_CONFIG="$(prompt_input "sing-box 配置路径" "$SINGBOX_CONFIG")"
-  SINGBOX_SERVICE="$(prompt_input "sing-box systemd 服务名" "$SINGBOX_SERVICE")"
+  SINGBOX_CONFIG="$(prompt_input "sing-box 配置路径"BOXINGBOX_SERVICE="$(prompt_input "sing-box systemd 服务名" "$SINGBOX_SERVICE")"
 
   show_config_summary
 
@@ -995,7 +1002,7 @@ console_show_status() {
 }
 
 console_main() {
-  exec </dev/tty 2>/dev/null || true
+  [[ -r /dev/tty ]] && exec </dev/tty || true
   load_config
   ensure_dirs
 
@@ -1022,33 +1029,41 @@ console_main() {
 
     case "$choice" in
       1)
-        tail -n 100 "$LOG_FILE" 2>/dev/null || true
         echo
-        read -r -p "按 Enter 返回..." _ </dev/tty || true
+        tail -n 100 "$LOG_FILE" 2>/dev/null || true
+        pause_return
         ;;
       2)
+        echo
+        echo "实时日志，按 Ctrl+C 返回终端后重新输入 sbip 进入菜单。"
+        echo
         tail -f "$LOG_FILE"
         ;;
       3)
-        bash "$SCRIPT_INSTALL_PATH" --run || true
         echo
-        read -r -p "按 Enter 返回..." _ </dev/tty || true
+        echo "开始执行同步，请稍候..."
+        echo
+        bash "$SCRIPT_INSTALL_PATH" --run 2>&1 || true
+        pause_return
         ;;
       4)
         systemctl enable --now "${SERVICE_NAME}.timer"
-        read -r -p "按 Enter 返回..." _ </dev/tty || true
+        echo "timer 已启动"
+        pause_return
         ;;
       5)
         systemctl disable --now "${SERVICE_NAME}.timer"
-        read -r -p "按 Enter 返回..." _ </dev/tty || true
+        echo "timer 已停止"
+        pause_return
         ;;
       6)
         systemctl restart "${SERVICE_NAME}.timer"
-        read -r -p "按 Enter 返回..." _ </dev/tty || true
+        echo "timer 已重启"
+        pause_return
         ;;
       7)
         run_setup
-        read -r -p "按 Enter 返回..." _ </dev/tty || true
+        pause_return
         ;;
       8)
         run_uninstall
@@ -1065,7 +1080,7 @@ console_main() {
 }
 
 run_uninstall() {
-  exec </dev/tty 2>/dev/null || true
+  [[ -r /dev/tty ]] && exec </dev/tty || true
 
   echo
   echo "将删除："
