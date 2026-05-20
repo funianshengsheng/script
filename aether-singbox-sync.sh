@@ -1,15 +1,22 @@
+cat > /usr/local/bin/aether-singbox-sync.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 ############################################################
 # Aether DynamicV6 -> sing-box IPv6 同步脚本
+#
 # 功能：
-# 1. 根据实例请求 Aether API 获取 IPv6
-# 2. 按 tag 精准替换 sing-box 配置中的 inet6_bind_address
-# 3. 仅当 IP 变化时写入配置并重启 sing-box
-# 4. 重启失败自动回滚旧配置并告警
-# 5. Telegram 通知
-# 6. setup / console / uninstall / timer
+# 1. 根据 VM UUID 请求 Aether DynamicV6 API 获取 IPv6
+# 2. 兼容新版 API: ipv6_cidr / lease / leases
+# 3. 自动去掉 /128，写入 sing-box inet6_bind_address
+# 4. 按 wg_interface 精准匹配 IPv6
+# 5. 按 sing-box tag 精准替换配置
+# 6. 仅当 IP 变化时写入配置并重启 sing-box
+# 7. 重启失败自动回滚旧配置并告警
+# 8. Telegram 通知
+# 9. setup / console / uninstall / timer
+# 10. 检测旧配置，可选择保留或重新填写
+# 11. 定时失败策略：连续 3 次失败才报警，每次间隔由 timer 控制，默认 5 分钟
 ############################################################
 
 ############################
@@ -28,6 +35,8 @@ STATE_DIR="/var/lib/${SERVICE_NAME}"
 LOG_DIR="/var/log/${SERVICE_NAME}"
 LOG_FILE="${LOG_DIR}/${SERVICE_NAME}.log"
 LAST_IP_FILE="${STATE_DIR}/last_ipv6"
+FAILURE_COUNT_FILE="${STATE_DIR}/failure_count"
+LAST_FAILURE_FILE="${STATE_DIR}/last_failure"
 LOG_CLEANUP_STAMP_FILE="${STATE_DIR}/last_log_cleanup"
 
 SINGBOX_CONFIG="/etc/sing-box/config.json"
@@ -38,28 +47,20 @@ BACKUP_DIR="/etc/sing-box/backup"
 # 默认配置
 ############################
 
-API_URL="https://billing.aethercloud.io/api/dynamicv6/vm/status"
+API_URL="https://billing.aethercloud.io/api/dynamicv6/vm"
 
 VM_UUID=""
 INSTANCE_PROFILE="Hong-Kong"
 
+# 留空表示使用内置映射：
+# Hong-Kong -> wg_interface=tw, tag=twv6
+# Dallas/Manassas/Los-Angeles/New-Jersey -> wg_interface=wg0, tag=attv6
+TARGET_WG_INTERFACE=""
+TARGET_TAG=""
+
 TG_BOT_TOKEN=""
-TG_CHAT_ID=""
-
-DISPLAY_TZ="Asia/Shanghai"
-TIMER_INTERVAL_MINUTES=5
-
-CURL_CONNECT_TIMEOUT=6
-CURL_MAX_TIME=20
-CURL_RETRY=2
-
-VERBOSE=1
-ENABLE_COLOR=1
-
-LOG_RETENTION_DAYS=1
-LOG_CLEANUP_INTERVAL_SECONDS=86400
-
-############################
+TG_CHAT_ID="ZShanghai=_CONNECT_TIME_REVERBOSE=1
+_COLOR_RET1LEAN00
 # 颜色 / 图标
 ############################
 
@@ -91,7 +92,6 @@ ICON_OK="✔"
 ICON_WARN="⚠"
 ICON_ERR="✘"
 ICON_SYNC="🔄"
-ICON_BOX="📦"
 ICON_TG="📨"
 ICON_DONE="🎉"
 
@@ -118,10 +118,7 @@ _log_write() {
 log_info() {
   local msg="$*"
   [[ "$VERBOSE" == "1" ]] && _print "$C_BLUE" "$ICON_INFO" "[INFO]" "$msg"
-  _log_write "[INFO ] $msg"
-}
-
-log_step() {
+  _log_write "[INFO ] $msg_step() {
   local msg="$*"
   [[ "$VERBOSE" == "1" ]] && _print "$C_CYAN" "$ICON_STEP" "[STEP]" "$msg"
   _log_write "[STEP ] $msg"
@@ -168,9 +165,13 @@ ensure_dirs() {
 
 cleanup_logs_daily() {
   local now last_cleanup=0
+
   now="$(date +%s)"
 
-  [[ -f "$LOG_CLEANUP_STAMP_FILE" ]] && last_cleanup="$(cat "$LOG_CLEANUP_STAMP_FILE" 2>/dev/null || echo 0)"
+  if [[ -f "$LOG_CLEANUP_STAMP_FILE" ]]; then
+    last_cleanup="$(cat "$LOG_CLEANUP_STAMP_FILE" 2>/dev/null || echo 0)"
+  fi
+
   [[ "$last_cleanup" =~ ^[0-9]+$ ]] || last_cleanup=0
 
   (( now - last_cleanup < LOG_CLEANUP_INTERVAL_SECONDS )) && return 0
@@ -189,7 +190,12 @@ cleanup_logs_daily() {
 mask_text() {
   local s="${1:-}"
   local len=${#s}
-  (( len <= 8 )) && { echo "****"; return; }
+
+  if (( len <= 8 )); then
+    echo "****"
+    return
+  fi
+
   echo "${s:0:4}****${s: -4}"
 }
 
@@ -203,19 +209,24 @@ _is_placeholder() {
 
 load_config() {
   [[ -f "$CONFIG_FILE" ]] || return 0
+
   # shellcheck disable=SC1090
   source "$CONFIG_FILE" || true
 }
 
 save_config() {
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_FILE" <<EOF
+
+  cat > "$CONFIG_FILE" <<EOF2
 # ${SERVICE_NAME} 配置
 # 生成时间: $(timestamp)
 
 API_URL="${API_URL}"
 VM_UUID="${VM_UUID}"
 INSTANCE_PROFILE="${INSTANCE_PROFILE}"
+
+TARGET_WG_INTERFACE="${TARGET_WG_INTERFACE}"
+TARGET_TAG="${TARGET_TAG}"
 
 TG_BOT_TOKEN="${TG_BOT_TOKEN}"
 TG_CHAT_ID="${TG_CHAT_ID}"
@@ -225,7 +236,8 @@ TIMER_INTERVAL_MINUTES="${TIMER_INTERVAL_MINUTES}"
 
 SINGBOX_CONFIG="${SINGBOX_CONFIG}"
 SINGBOX_SERVICE="${SINGBOX_SERVICE}"
-EOF
+EOF2
+
   chmod 600 "$CONFIG_FILE"
   log_ok "配置已保存: $CONFIG_FILE"
 }
@@ -263,23 +275,32 @@ instance_label() {
     "Manassas") echo "Manassas" ;;
     "Los-Angeles") echo "Los-Angeles" ;;
     "New-Jersey") echo "New-Jersey" ;;
-    "Los-Angeles(CO)") echo "Los-Angeles(CO)" ;;
     *) echo "$INSTANCE_PROFILE" ;;
   esac
 }
 
 get_target_wg_interface() {
+  if [[ -n "${TARGET_WG_INTERFACE:-}" ]]; then
+    echo "$TARGET_WG_INTERFACE"
+    return
+  fi
+
   case "$INSTANCE_PROFILE" in
     "Hong-Kong") echo "tw" ;;
-    "Dallas"|"Manassas"|"Los-Angeles"|"New-Jersey"|"Los-Angeles(CO)") echo "wg0" ;;
+    "Dallas"|"Manassas"|"Los-Angeles"|"New-Jersey") echo "wg0" ;;
     *) echo "tw" ;;
   esac
 }
 
 get_target_tag() {
+  if [[ -n "${TARGET_TAG:-}" ]]; then
+    echo "$TARGET_TAG"
+    return
+  fi
+
   case "$INSTANCE_PROFILE" in
     "Hong-Kong") echo "twv6" ;;
-    "Dallas"|"Manassas"|"Los-Angeles"|"New-Jersey"|"Los-Angeles(CO)") echo "attv6" ;;
+    "Dallas"|"Manassas"|"Los-Angeles"|"New-Jersey") echo "attv6" ;;
     *) echo "twv6" ;;
   esac
 }
@@ -298,6 +319,7 @@ detect_vm_uuid() {
   if command -v dmidecode >/dev/null 2>&1; then
     local u
     u="$(dmidecode -s system-uuid 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+
     if [[ -n "$u" && "$u" != "notsettable" ]]; then
       echo "$u"
       return 0
@@ -307,8 +329,87 @@ detect_vm_uuid() {
   return 1
 }
 
+show_config_summary() {
+  echo
+  printf "%s" "$C_MAGENTA"; print_line
+  printf "%s%s  当前配置摘要%s\n" "$C_BOLD" "$C_CYAN" "$C_RESET"
+  printf "%s" "$C_MAGENTA"; print_line
+  printf "%s" "$C_RESET"
+  printf "  实例名称         : %s\n" "$(instance_label)"
+  printf "  API              : %s\n" "$API_URL"
+  printf "  wg_interface     : %s\n" "$(get_target_wg_interface)"
+  printf "  sing-box tag     : %s\n" "$(get_target_tag)"
+  printf "  TG Bot Token     : %s\n" "$( ! _is_placeholder "$TG_BOT_TOKEN" && mask_text "$TG_BOT_TOKEN" || echo "未配置" )"
+  printf "  TG Chat ID       : %s\n" "$( ! _is_placeholder "$TG_CHAT_ID" && echo "$TG_CHAT_ID" || echo "未配置" )"
+  printf "  时区             : %s\n" "$DISPLAY_TZ"
+  printf "  定时间隔         : %s 分钟\n" "$TIMER_INTERVAL_MINUTES"
+  printf "  VM UUID          : %s\n" "$( [[ -n "$VM_UUID" ]] && echo "$VM_UUID" || echo "自动检测" )"
+  printf "  sing-box 配置    : %s\n" "$SINGBOX_CONFIG"
+  printf "  sing-box 服务    : %s\n" "$SINGBOX_SERVICE"
+  printf "%s" "$C_MAGENTA"; print_line
+  printf "%s" "$C_RESET"
+}
+
 run_setup() {
   exec </dev/tty 2>/dev/null || true
+  clear 2>/dev/null || true
+
+  ensure_dirs
+
+  local old_config_action="new"
+
+  if [[ -f "$CONFIG_FILE" ]]; then
+    load_config
+
+    echo
+    printf "%s" "$C_MAGENTA"; print_line
+    printf "%s%s  检测到已有配置%s\n" "$C_BOLD" "$C_YELLOW" "$C_RESET"
+    printf "%s" "$C_MAGENTA"; print_line
+    printf "%s" "$C_RESET"
+
+    show_config_summary
+
+    echo
+    echo "  1) 保留旧配置并继续安装/执行"
+    echo "  2) 重新填写配置"
+    echo
+    printf "%s请选择 [1/2，默认 1]: %s" "$C_BOLD" "$C_RESET"
+
+    local choice
+    read -r choice </dev/tty || true
+    choice="${choice:-1}"
+
+    case "$choice" in
+      1)
+        old_config_action="keep"
+        ;;
+      2)
+        old_config_action="new"
+        ;;
+      *)
+        warn "输入无效，默认保留旧配置"
+        old_config_action="keep"
+        ;;
+    esac
+
+    if [[ "$old_config_action" == "keep" ]]; then
+      log_ok "已选择保留旧配置"
+      echo
+      printf "%s是否立即安装/更新定时任务并执行一次同步？[Y/n]: %s" "$C_BOLD" "$C_RESET"
+
+      local do_run
+      read -r do_run </dev/tty || true
+      do_run="${do_run:-Y}"
+
+      if [[ "${do_run^^}" == "Y" ]]; then
+        install_systemd_timer
+        main_run
+      fi
+
+      return 0
+    fi
+  fi
+
   clear 2>/dev/null || true
 
   echo
@@ -325,38 +426,59 @@ run_setup() {
   echo "  3. Manassas"
   echo "  4. Los-Angeles"
   echo "  5. New-Jersey"
-  echo "  6. Los-Angeles(CO)"
   echo
 
   local instance_default instance_in
+
   case "$INSTANCE_PROFILE" in
     "Hong-Kong") instance_default="1" ;;
     "Dallas") instance_default="2" ;;
     "Manassas") instance_default="3" ;;
     "Los-Angeles") instance_default="4" ;;
     "New-Jersey") instance_default="5" ;;
-    "Los-Angeles(CO)") instance_default="6" ;;
     *) instance_default="1" ;;
   esac
 
   instance_in="$(_prompt_input "请输入选项" "$instance_default")"
+
   case "$instance_in" in
     ""|1) INSTANCE_PROFILE="Hong-Kong" ;;
     2) INSTANCE_PROFILE="Dallas" ;;
     3) INSTANCE_PROFILE="Manassas" ;;
     4) INSTANCE_PROFILE="Los-Angeles" ;;
     5) INSTANCE_PROFILE="New-Jersey" ;;
-    6) INSTANCE_PROFILE="Los-Angeles(CO)" ;;
-    "Hong-Kong"|"Dallas"|"Manassas"|"Los-Angeles"|"New-Jersey"|"Los-Angeles(CO)") INSTANCE_PROFILE="$instance_in" ;;
+    "Hong-Kong"|"Dallas"|"Manassas"|"Los-Angeles"|"New-Jersey") INSTANCE_PROFILE="$instance_in" ;;
     *) warn "输入无效，保留当前实例: $INSTANCE_PROFILE" ;;
   esac
+
+  echo
+  printf "%s%s[ API 设置 ]%s\n" "$C_BOLD" "$C_YELLOW" "$C_RESET"
+  echo
+
+  local api_in
+  api_in="$(_prompt_input "API 地址，推荐保持默认" "$API_URL")"
+  [[ -n "$api_in" ]] && API_URL="$api_in"
+
+  echo
+  printf "%s%s[ 匹配设置 ]%s\n" "$C_BOLD" "$C_YELLOW" "$C_RESET"
+  echo "  留空使用内置映射："
+  echo "  Hong-Kong -> wg_interface=tw, tag=twv6"
+  echo "  美国地区  -> wg_interface=wg0, tag=attv6"
+  echo
+
+  local wg_in tag_in
+  wg_in="$(_prompt_input "自定义 wg_interface，留空自动" "$TARGET_WG_INTERFACE")"
+  TARGET_WG_INTERFACE="$wg_in"
+
+  tag_in="$(_prompt_input "自定义 sing-box tag，留空自动" "$TARGET_TAG")"
+  TARGET_TAG="$tag_in"
 
   echo
   printf "%s%s[ Telegram 通知 ]%s\n" "$C_BOLD" "$C_YELLOW" "$C_RESET"
   echo
 
-  TG_BOT_TOKEN="$(_prompt_input "TG Bot Token（留空可跳过）" "${TG_BOT_TOKEN:-}" "1")"
-  TG_CHAT_ID="$(_prompt_input "TG Chat ID（留空可跳过）" "${TG_CHAT_ID:-}")"
+  TG_BOT_TOKEN="$(_prompt_input "TG Bot Token，留空可跳过" "${TG_BOT_TOKEN:-}" "1")"
+  TG_CHAT_ID="$(_prompt_input "TG Chat ID，留空可跳过" "${TG_CHAT_ID:-}")"
 
   echo
   printf "%s%s[ 高级选项 ]%s\n" "$C_BOLD" "$C_YELLOW" "$C_RESET"
@@ -366,10 +488,11 @@ run_setup() {
   tz_in="$(_prompt_input "时区" "$DISPLAY_TZ")"
   [[ -n "$tz_in" ]] && DISPLAY_TZ="$tz_in"
 
-  interval_in="$(_prompt_input "定时间隔（分钟）" "$TIMER_INTERVAL_MINUTES")"
+  interval_in="$(_prompt_input "定时间隔，分钟，建议 5" "$TIMER_INTERVAL_MINUTES")"
   [[ "$interval_in" =~ ^[0-9]+$ ]] && TIMER_INTERVAL_MINUTES="$interval_in"
+  (( TIMER_INTERVAL_MINUTES > 0 )) || TIMER_INTERVAL_MINUTES=5
 
-  uuid_in="$(_prompt_input "VM UUID（留空自动检测）" "$VM_UUID")"
+  uuid_in="$(_prompt_input "VM UUID，留空自动检测" "$VM_UUID")"
   VM_UUID="$uuid_in"
 
   config_in="$(_prompt_input "sing-box 配置路径" "$SINGBOX_CONFIG")"
@@ -378,36 +501,24 @@ run_setup() {
   service_in="$(_prompt_input "sing-box systemd 服务名" "$SINGBOX_SERVICE")"
   [[ -n "$service_in" ]] && SINGBOX_SERVICE="$service_in"
 
-  echo
-  printf "%s" "$C_MAGENTA"; print_line
-  printf "%s%s  配置确认%s\n" "$C_BOLD" "$C_CYAN" "$C_RESET"
-  printf "%s" "$C_MAGENTA"; print_line
-  printf "%s" "$C_RESET"
-  printf "  实例名称         : %s\n" "$(instance_label)"
-  printf "  wg_interface     : %s\n" "$(get_target_wg_interface)"
-  printf "  sing-box tag     : %s\n" "$(get_target_tag)"
-  printf "  TG Bot Token     : %s\n" "$( ! _is_placeholder "$TG_BOT_TOKEN" && mask_text "$TG_BOT_TOKEN" || echo "未配置" )"
-  printf "  TG Chat ID       : %s\n" "$( ! _is_placeholder "$TG_CHAT_ID" && echo "$TG_CHAT_ID" || echo "未配置" )"
-  printf "  时区             : %s\n" "$DISPLAY_TZ"
-  printf "  定时间隔         : %s 分钟\n" "$TIMER_INTERVAL_MINUTES"
-  printf "  VM UUID          : %s\n" "$( [[ -n "$VM_UUID" ]] && echo "$VM_UUID" || echo "自动检测" )"
-  printf "  sing-box 配置    : %s\n" "$SINGBOX_CONFIG"
-  printf "  sing-box 服务    : %s\n" "$SINGBOX_SERVICE"
+  show_config_summary
 
   echo
   printf "%s以上配置是否保存？[Y/n]: %s" "$C_BOLD" "$C_RESET"
+
   local confirm
-  read -r confirm </dev/tty
+  read -r confirm </dev/tty || true
   confirm="${confirm:-Y}"
 
   if [[ "${confirm^^}" == "Y" ]]; then
-    ensure_dirs
     save_config
     echo
     printf "%s是否立即安装定时任务并执行一次同步？[Y/n]: %s" "$C_BOLD" "$C_RESET"
+
     local do_run
-    read -r do_run </dev/tty
+    read -r do_run </dev/tty || true
     do_run="${do_run:-Y}"
+
     if [[ "${do_run^^}" == "Y" ]]; then
       install_systemd_timer
       main_run
@@ -418,7 +529,7 @@ run_setup() {
 }
 
 ############################
-# TG
+# Telegram
 ############################
 
 send_tg_message() {
@@ -488,11 +599,53 @@ ${detail}
 }
 
 ############################
+# 连续失败计数
+############################
+
+get_failure_count() {
+  local n=0
+
+  if [[ -f "$FAILURE_COUNT_FILE" ]]; then
+    n="$(cat "$FAILURE_COUNT_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo "$n"
+}
+
+reset_failure_count() {
+  echo 0 > "$FAILURE_COUNT_FILE"
+  : > "$LAST_FAILURE_FILE"
+  chmod 600 "$FAILURE_COUNT_FILE" "$LAST_FAILURE_FILE" >/dev/null 2>&1 || true
+}
+
+record_failure_count() {
+  local reason="$1"
+  local n
+
+  n="$(get_failure_count)"
+  n=$((n + 1))
+
+  echo "$n" > "$FAILURE_COUNT_FILE"
+  {
+    echo "time=$(timestamp)"
+    echo "count=$n"
+    echo "reason=$reason"
+  } > "$LAST_FAILURE_FILE"
+
+  chmod 600 "$FAILURE_COUNT_FILE" "$LAST_FAILURE_FILE" >/dev/null 2>&1 || true
+
+  echo "$n"
+}
+
+############################
 # 核心逻辑
 ############################
 
 api_post_json() {
-  local url="$1" payload="$2"
+  local url="$1"
+  local payload="$2"
+
   curl -fsS \
     --connect-timeout "$CURL_CONNECT_TIMEOUT" \
     --max-time "$CURL_MAX_TIME" \
@@ -506,40 +659,148 @@ api_post_json() {
 
 validate_ipv6() {
   local ip="$1"
-  [[ -n "$ip" && "$ip" != "null" && "$ip" == *:* ]]
+
+  [[ -n "$ip" ]] || return 1
+  [[ "$ip" != "null" ]] || return 1
+  [[ "$ip" == *:* ]] || return 1
+  [[ "$ip" != */* ]] || return 1
+
+  return 0
 }
 
 get_api_ipv6() {
   local vm_uuid="$1"
   local wg_interface="$2"
-  local payload api_json target_ipv6
+  local payload api_json target_ipv6 status_url allocate_url api_base active lease_count
 
   payload="$(jq -cn --arg vm_uuid "$vm_uuid" '{vm_uuid:$vm_uuid}')"
-  api_json="$(api_post_json "$API_URL" "$payload")"
+
+  if [[ "$API_URL" == */status ]]; then
+    status_url="$API_URL"
+    api_base="${API_URL%/status}"
+    allocate_url="${api_base}/allocate"
+  else
+    api_base="${API_URL%/}"
+    status_url="${api_base}/status"
+    allocate_url="${api_base}/allocate"
+  fi
+
+  log_info "请求 Aether API: $status_url"
+
+  api_json="$(api_post_json "$status_url" "$payload")"
+
+  active="$(echo "$api_json" | jq -r '.active // false')"
+
+  lease_count="$(echo "$api_json" | jq '
+    def to_arr:
+      if . == null then []
+      elif type == "array" then .
+      elif type == "object" then [.]
+      else []
+      end;
+
+    ((.leases | to_arr) + (.lease | to_arr))
+    | map(select(type == "object"))
+    | length
+  ')"
+
+  if [[ "$active" != "true" || "$lease_count" -eq 0 ]]; then
+    log_info "status 未返回有效租约，尝试 allocate: $allocate_url"
+    api_json="$(api_post_json "$allocate_url" "$payload")"
+  fi
 
   target_ipv6="$(echo "$api_json" | jq -r --arg wg "$wg_interface" '
+    def to_arr:
+      if . == null then []
+      elif type == "array" then .
+      elif type == "object" then [.]
+      else []
+      end;
+
     (
-      [
-        (.lease // empty),
-        ((.leases // [])[]?)
-      ]
-      | map(select(.wg_interface == $wg))
-      | .[0].ipv6
+      ((.leases | to_arr) + (.lease | to_arr))
+      | map(select(type == "object"))
+      | map(select((.wg_interface // "") == $wg))
+      | .[0]
+      | (.ipv6_cidr // .ipv6 // .address // .ip // empty)
     ) // empty
   ')"
+
+  if [[ -z "$target_ipv6" || "$target_ipv6" == "null" ]]; then
+    lease_count="$(echo "$api_json" | jq '
+      def to_arr:
+        if . == null then []
+        elif type == "array" then .
+        elif type == "object" then [.]
+        else []
+        end;
+
+      ((.leases | to_arr) + (.lease | to_arr))
+      | map(select(type == "object"))
+      | length
+    ')"
+
+    if [[ "$lease_count" -eq 1 ]]; then
+      warn "未匹配到 wg_interface=${wg_interface}，但只有一个 lease，自动使用该 IPv6"
+
+      target_ipv6="$(echo "$api_json" | jq -r '
+        def to_arr:
+          if . == null then []
+          elif type == "array" then .
+          elif type == "object" then [.]
+          else []
+          end;
+
+        (
+          ((.leases | to_arr) + (.lease | to_arr))
+          | map(select(type == "object"))
+          | .[0]
+          | (.ipv6_cidr // .ipv6 // .address // .ip // empty)
+        ) // empty
+      ')"
+    else
+      warn "未找到 wg_interface=${wg_interface} 对应的 IPv6"
+      warn "当前 API 返回的 lease 列表："
+
+      echo "$api_json" | jq -r '
+        def to_arr:
+          if . == null then []
+          elif type == "array" then .
+          elif type == "object" then [.]
+          else []
+          end;
+
+        ((.leases | to_arr) + (.lease | to_arr))
+        | map(select(type == "object"))
+        | .[]
+        | "wg_interface=\(.wg_interface // "unknown") ipv6=\(.ipv6_cidr // .ipv6 // .address // .ip // "empty")"
+      ' | while read -r line; do
+        warn "$line"
+      done
+
+      echo ""
+      return 0
+    fi
+  fi
+
+  target_ipv6="${target_ipv6%%/*}"
 
   echo "$target_ipv6"
 }
 
 tag_exists() {
   local tag="$1"
+
   jq -e --arg tag "$tag" '.outbounds[]? | select(.tag == $tag)' "$SINGBOX_CONFIG" >/dev/null 2>&1
 }
 
 get_current_bind_ip() {
   local tag="$1"
+
   jq -r --arg tag "$tag" '
-    .outbounds[]? | select(.tag == $tag) | .inet6_bind_address // empty
+    .outbounds[]?
+    | select(.tag == $tag)
+    | .inet6_bind_address // empty
   ' "$SINGBOX_CONFIG" | head -n1
 }
 
@@ -568,7 +829,9 @@ set_bind_ip_with_backup() {
 
 restore_backup_config() {
   local backup_file="$1"
+
   [[ -f "$backup_file" ]] || return 1
+
   cp -a "$backup_file" "$SINGBOX_CONFIG"
   chmod 600 "$SINGBOX_CONFIG" >/dev/null 2>&1 || true
 }
@@ -582,6 +845,7 @@ precheck() {
   load_config
   ensure_dirs
   cleanup_logs_daily
+
   need_cmd curl
   need_cmd jq
   need_cmd systemctl
@@ -597,11 +861,14 @@ run_once() {
   local restart_error_detail rollback_ok=0
 
   log_step "获取 VM UUID"
+
   vm_uuid="$(detect_vm_uuid || true)"
+
   [[ -n "$vm_uuid" ]] || {
     err "无法检测 VM UUID，请在配置中填写 VM_UUID"
     return 1
   }
+
   log_ok "VM UUID: $(mask_text "$vm_uuid")"
 
   wg_interface="$(get_target_wg_interface)"
@@ -612,12 +879,14 @@ run_once() {
   log_info "目标 tag: $target_tag"
 
   log_step "请求 Aether DynamicV6 API"
+
   target_ipv6="$(get_api_ipv6 "$vm_uuid" "$wg_interface")"
 
   validate_ipv6 "$target_ipv6" || {
-    err "未获取到有效 IPv6: $target_ipv6"
+    err "未获取到有效 IPv6: ${target_ipv6:-empty}"
     return 1
   }
+
   log_ok "目标 IPv6: $target_ipv6"
 
   tag_exists "$target_tag" || {
@@ -626,7 +895,12 @@ run_once() {
   }
 
   current_ip="$(get_current_bind_ip "$target_tag")"
-  [[ -n "$current_ip" ]] && log_info "当前配置 IPv6: $current_ip" || warn "当前 inet6_bind_address 为空，将直接写入"
+
+  if [[ -n "$current_ip" ]]; then
+    log_info "当前配置 IPv6: $current_ip"
+  else
+    warn "当前 inet6_bind_address 为空，将直接写入"
+  fi
 
   if [[ "$current_ip" == "$target_ipv6" ]]; then
     echo "$target_ipv6" > "$LAST_IP_FILE"
@@ -642,9 +916,11 @@ run_once() {
   log_info "新值: $target_ipv6"
 
   set_bind_ip_with_backup "$target_tag" "$target_ipv6" "$backup_file"
+
   log_ok "已更新配置: tag=${target_tag} -> $target_ipv6"
 
   log_step "重启 sing-box"
+
   if restart_singbox; then
     echo "$target_ipv6" > "$LAST_IP_FILE"
     chmod 600 "$LAST_IP_FILE" >/dev/null 2>&1 || true
@@ -654,6 +930,7 @@ run_once() {
   fi
 
   restart_error_detail="$(systemctl status "$SINGBOX_SERVICE" --no-pager -l 2>/dev/null | tail -n 20 || true)"
+
   err "sing-box 重启失败，开始自动回滚旧配置"
 
   if restore_backup_config "$backup_file"; then
@@ -695,30 +972,44 @@ ${restart_error_detail}"
 main_run() {
   log_step "${ICON_SYNC} 开始执行同步任务"
 
-  local err1="" err2=""
+  local failure_count failure_detail recent_logs
 
   if run_once; then
-    log_ok "${ICON_DONE} 任务执行成功"
+    reset_failure_count
+    log_ok "${ICON_DONE} 任务执行成功，连续失败计数已清零"
     exit 0
-  else
-    err1="第一次执行失败：$(timestamp)"
-    warn "$err1，3 秒后重试"
-    sleep 3
   fi
 
-  if run_once; then
-    log_ok "${ICON_DONE} 第二次重试成功"
-    exit 0
-  else
-    err2="第二次执行失败：$(timestamp)"
-    err "$err2"
+  failure_detail="同步任务失败：$(timestamp)"
+  failure_count="$(record_failure_count "$failure_detail")"
+
+  warn "本次同步失败，当前连续失败次数: ${failure_count}/3"
+
+  if (( failure_count < 3 )); then
+    warn "未达到报警阈值，不发送 Telegram。下一次将由 systemd timer 在约 ${TIMER_INTERVAL_MINUTES} 分钟后再次执行"
+    exit 1
   fi
 
-  send_tg_failure \
-    "sing-box IPv6 同步连续失败" \
-    "${err1}
-${err2}
-请检查 API / sing-box 配置 / 服务状态。"
+  if (( failure_count == 3 )); then
+    recent_logs="$(tail -n 80 "$LOG_FILE" 2>/dev/null || true)"
+
+    err "连续失败已达到 3 次，发送 Telegram 报警"
+
+    send_tg_failure \
+      "sing-box IPv6 同步连续 3 次失败" \
+      "脚本已经连续 3 次未能成功获取或写入 IPv6。
+每次运行间隔约 ${TIMER_INTERVAL_MINUTES} 分钟。
+
+失败次数：${failure_count}
+最近失败：${failure_detail}
+
+最近日志：
+${recent_logs}"
+
+    exit 1
+  fi
+
+  warn "连续失败次数已超过 3 次，本次不重复报警，避免通知刷屏"
   exit 1
 }
 
@@ -733,8 +1024,11 @@ install_systemd_timer() {
   fi
 
   local interval="${TIMER_INTERVAL_MINUTES}"
+
   [[ "$interval" =~ ^[0-9]+$ ]] || interval=5
   (( interval > 0 )) || interval=5
+
+  TIMER_INTERVAL_MINUTES="$interval"
 
   mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")"
 
@@ -742,9 +1036,11 @@ install_systemd_timer() {
     cp -f "$0" "$SCRIPT_INSTALL_PATH"
     chmod +x "$SCRIPT_INSTALL_PATH"
     log_ok "脚本已安装到: $SCRIPT_INSTALL_PATH"
+  else
+    chmod +x "$SCRIPT_INSTALL_PATH"
   fi
 
-  cat > "$SERVICE_FILE" <<EOF
+  cat > "$SERVICE_FILE" <<EOF2
 [Unit]
 Description=Aether sing-box IPv6 Sync
 After=network-online.target
@@ -753,30 +1049,32 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${SCRIPT_INSTALL_PATH} --run
-EOF
+EOF2
 
-  cat > "$TIMER_FILE" <<EOF
+  cat > "$TIMER_FILE" <<EOF2
 [Unit]
 Description=Run Aether sing-box IPv6 Sync every ${interval} minutes
 
 [Timer]
 OnBootSec=1min
-OnCalendar=*:0/${interval}
+OnUnitActiveSec=${interval}min
 Unit=${SERVICE_NAME}.service
 Persistent=true
 
 [Install]
 WantedBy=timers.target
-EOF
+EOF2
 
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}.timer" >/dev/null 2>&1
+
   log_ok "systemd timer 已启用，间隔: ${interval} 分钟"
 
-  cat > /usr/local/bin/sbip <<EOF
+  cat > /usr/local/bin/sbip <<EOF2
 #!/usr/bin/env bash
 exec ${SCRIPT_INSTALL_PATH} console
-EOF
+EOF2
+
   chmod +x /usr/local/bin/sbip
   log_ok "快捷命令已安装: sbip"
 }
@@ -786,15 +1084,23 @@ EOF
 ############################
 
 console_show_status() {
-  local current_config_ip timer_status last_run instance_show target_tag last_ip
+  local current_config_ip timer_status last_run instance_show target_tag last_ip fail_count
 
   instance_show="$(instance_label)"
   target_tag="$(get_target_tag)"
   current_config_ip="$(get_current_bind_ip "$target_tag" 2>/dev/null || true)"
+
   [[ -z "$current_config_ip" ]] && current_config_ip="未读取到"
 
-  [[ -f "$LAST_IP_FILE" ]] && last_ip="$(cat "$LAST_IP_FILE" 2>/dev/null || true)"
+  if [[ -f "$LAST_IP_FILE" ]]; then
+    last_ip="$(cat "$LAST_IP_FILE" 2>/dev/null || true)"
+  else
+    last_ip=""
+  fi
+
   [[ -z "${last_ip:-}" ]] && last_ip="无记录"
+
+  fail_count="$(get_failure_count)"
 
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet "${SERVICE_NAME}.timer" 2>/dev/null; then
@@ -815,10 +1121,13 @@ console_show_status() {
   printf "%s" "$C_MAGENTA"; print_line
   printf "%s" "$C_RESET"
   printf "  实例名称         : %s\n" "$instance_show"
+  printf "  API              : %s\n" "$API_URL"
   printf "  wg_interface     : %s\n" "$(get_target_wg_interface)"
   printf "  目标 tag         : %s\n" "$target_tag"
   printf "  定时任务         : %b\n" "$timer_status"
+  printf "  定时间隔         : %s 分钟\n" "$TIMER_INTERVAL_MINUTES"
   printf "  上次执行         : %s\n" "$last_run"
+  printf "  连续失败次数     : %s\n" "$fail_count"
   printf "  配置当前 IP      : %s\n" "$current_config_ip"
   printf "  上次同步 IP      : %s\n" "$last_ip"
   printf "  配置文件         : %s\n" "$CONFIG_FILE"
@@ -837,9 +1146,11 @@ console_view_log() {
 
   echo
   printf "  %s请输入查看行数 [默认 50]: %s" "$C_BOLD" "$C_RESET"
+
   local lines
-  read -r lines </dev/tty
+  read -r lines </dev/tty || true
   lines="${lines:-50}"
+
   [[ "$lines" =~ ^[0-9]+$ ]] || lines=50
 
   echo
@@ -847,6 +1158,7 @@ console_view_log() {
   printf "%s最近 %s 行日志%s\n" "$C_BOLD" "$lines" "$C_RESET"
   printf "%s" "$C_DIM"; print_subline
   printf "%s" "$C_RESET"
+
   tail -n "$lines" "$LOG_FILE"
   echo
 }
@@ -856,7 +1168,8 @@ console_follow_log() {
     warn "日志文件不存在"
     return
   }
-  printf "%s实时日志（Ctrl+C 退出）%s\n" "$C_CYAN" "$C_RESET"
+
+  printf "%s实时日志，Ctrl+C 退出%s\n" "$C_CYAN" "$C_RESET"
   tail -f "$LOG_FILE"
 }
 
@@ -864,6 +1177,7 @@ console_run_now() {
   echo
   printf "%s立即执行一次同步...%s\n" "$C_CYAN" "$C_RESET"
   echo
+
   bash "$SCRIPT_INSTALL_PATH" --run
 }
 
@@ -874,17 +1188,20 @@ console_timer_menu() {
   printf "  2) 启动 timer\n"
   printf "  3) 停止 timer\n"
   printf "  4) 重启 timer\n"
+  printf "  5) 重新安装 timer\n"
   printf "  0) 返回\n"
   echo
   printf "%s请选择: %s" "$C_BOLD" "$C_RESET"
 
   local sub
-  read -r sub </dev/tty
+  read -r sub </dev/tty || true
+
   case "$sub" in
     1) systemctl status "${SERVICE_NAME}.timer" --no-pager ;;
     2) systemctl enable --now "${SERVICE_NAME}.timer" && log_ok "timer 已启动" ;;
     3) systemctl disable --now "${SERVICE_NAME}.timer" && log_ok "timer 已停止" ;;
     4) systemctl restart "${SERVICE_NAME}.timer" && log_ok "timer 已重启" ;;
+    5) install_systemd_timer ;;
     0) return ;;
     *) warn "无效选项" ;;
   esac
@@ -912,7 +1229,7 @@ run_uninstall() {
   printf "%s确认卸载？[y/N]: %s" "$C_BOLD" "$C_RESET"
 
   local confirm
-  read -r confirm </dev/tty
+  read -r confirm </dev/tty || true
   confirm="${confirm:-N}"
 
   if [[ "${confirm^^}" != "Y" ]]; then
@@ -930,6 +1247,7 @@ run_uninstall() {
   rm -rf "$STATE_DIR" "$LOG_DIR"
 
   systemctl daemon-reload 2>/dev/null || true
+
   log_ok "卸载完成"
   exit 0
 }
@@ -956,16 +1274,43 @@ console_main() {
     printf "%s请输入选项: %s" "$C_BOLD" "$C_RESET"
 
     local choice
-    read -r choice </dev/tty
+    read -r choice </dev/tty || true
+
     case "$choice" in
-      1) console_view_log; printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"; read -r _ </dev/tty ;;
-      2) console_follow_log ;;
-      3) console_run_now; printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"; read -r _ </dev/tty ;;
-      4) console_timer_menu; printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"; read -r _ </dev/tty ;;
-      5) run_setup; printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"; read -r _ </dev/tty ;;
-      6) run_uninstall ;;
-      0) echo "再见"; exit 0 ;;
-      *) warn "无效选项"; sleep 1 ;;
+      1)
+        console_view_log
+        printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"
+        read -r _ </dev/tty || true
+        ;;
+      2)
+        console_follow_log
+        ;;
+      3)
+        console_run_now
+        printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"
+        read -r _ </dev/tty || true
+        ;;
+      4)
+        console_timer_menu
+        printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"
+        read -r _ </dev/tty || true
+        ;;
+      5)
+        run_setup
+        printf "\n%s按 Enter 继续...%s" "$C_DIM" "$C_RESET"
+        read -r _ </dev/tty || true
+        ;;
+      6)
+        run_uninstall
+        ;;
+      0)
+        echo "再见"
+        exit 0
+        ;;
+      *)
+        warn "无效选项"
+        sleep 1
+        ;;
     esac
   done
 }
@@ -975,15 +1320,22 @@ console_main() {
 ############################
 
 usage() {
-  cat <<EOF
+  cat <<EOF2
 Usage:
-  $0                首次运行：配置 -> 安装 timer -> 执行同步
+  $0                首次运行或检测旧配置：配置/保留配置 -> 安装 timer -> 执行同步
   $0 --run          仅执行一次同步
   $0 --install      安装/启用 systemd 定时任务
   $0 setup          打开配置向导
   $0 console        打开控制台
   $0 uninstall      卸载脚本
-EOF
+
+快捷命令：
+  sbip              打开控制台
+
+说明：
+  - 连续失败 3 次才会发送 Telegram 告警
+  - 默认 timer 每 5 分钟执行一次
+EOF2
 }
 
 ############################
@@ -993,12 +1345,10 @@ EOF
 case "${1:-}" in
   "")
     load_config
-    if [[ ! -f "$CONFIG_FILE" ]]; then
+    if [[ -f "$CONFIG_FILE" ]]; then
       run_setup
     else
-      precheck
-      install_systemd_timer
-      main_run
+      run_setup
     fi
     ;;
   --run)
@@ -1030,3 +1380,6 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+EOF
+
+chmod +x /usr/local/bin/aether-singbox-sync.sh
